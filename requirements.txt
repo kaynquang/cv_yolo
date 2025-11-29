@@ -1,0 +1,10 @@
+streamlit
+opencv-python
+ultralytics
+numpy
+pillow
+scikit-learn
+gtts
+playsound==1.2.2
+torch
+torchvision
