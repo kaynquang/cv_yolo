@@ -5,12 +5,12 @@ import pickle
 import time
 import os
 import tempfile
+from ultralytics import YOLO
 
 from voice import speak  # dùng voice.py của bạn
 from PIL import Image
 import glob
 import random
-from ultralytics import YOLO
 
 # ================== CẤU HÌNH TRANG ==================
 st.set_page_config(page_title="Yoga Pose Trainer", layout="wide")
@@ -76,32 +76,25 @@ def tinh_goc(a, b, c):
     return 360 - goc if goc > 180.0 else goc
 
 
-# YOLO Pose keypoint indices
-YOLO_KEYPOINTS = {
-    'VAI_TRAI': 5, 'VAI_PHAI': 6,
-    'KHUYU_TRAI': 7, 'KHUYU_PHAI': 8,
-    'CO_TAY_TRAI': 9, 'CO_TAY_PHAI': 10,
-    'HONG_TRAI': 11, 'HONG_PHAI': 12,
-    'GOI_TRAI': 13, 'GOI_PHAI': 14,
-    'CO_CHAN_TRAI': 15, 'CO_CHAN_PHAI': 16,
-}
-
-# YOLO skeleton connections
-YOLO_SKELETON = [
-    (5, 6), (5, 7), (7, 9), (6, 8), (8, 10),  # arms
-    (5, 11), (6, 12), (11, 12),  # torso
-    (11, 13), (13, 15), (12, 14), (14, 16),  # legs
-]
-
-
 def lay_toa_do_yolo(keypoints, idx):
-    """Lấy tọa độ từ YOLO keypoints array."""
+    """Lấy tọa độ từ YOLO keypoints (shape: 17x2 hoặc 17x3)."""
     return [keypoints[idx][0], keypoints[idx][1]]
 
 
-def tinh_goc_cac_khop(keypoints):
-    """Tính góc các khớp từ YOLO keypoints."""
-    idx = YOLO_KEYPOINTS
+def tinh_goc_cac_khop_yolo(keypoints):
+    """Tính góc các khớp từ YOLO keypoints.
+    YOLO indices: 5-left_shoulder, 6-right_shoulder, 7-left_elbow, 8-right_elbow,
+    9-left_wrist, 10-right_wrist, 11-left_hip, 12-right_hip,
+    13-left_knee, 14-right_knee, 15-left_ankle, 16-right_ankle
+    """
+    idx = {
+        'VAI_TRAI': 5, 'VAI_PHAI': 6,
+        'KHUYU_TRAI': 7, 'KHUYU_PHAI': 8,
+        'CO_TAY_TRAI': 9, 'CO_TAY_PHAI': 10,
+        'HONG_TRAI': 11, 'HONG_PHAI': 12,
+        'GOI_TRAI': 13, 'GOI_PHAI': 14,
+        'CO_CHAN_TRAI': 15, 'CO_CHAN_PHAI': 16,
+    }
     return {
         "left_elbow": tinh_goc(lay_toa_do_yolo(keypoints, idx['VAI_TRAI']),
                                lay_toa_do_yolo(keypoints, idx['KHUYU_TRAI']),
@@ -148,47 +141,50 @@ def danh_gia_tu_the(goc_co_the, ten_tu_the):
     return int(np.mean(diem_so)) if diem_so else 0, can_chinh[:2]
 
 
-def trich_xuat_keypoints_yolo(keypoints):
-    """Trích xuất keypoints từ YOLO để dùng với model ML."""
-    # YOLO có 17 keypoints, mỗi keypoint có (x, y, conf)
-    # Chuyển sang dạng tương thích với model (33 landmarks * 3 = 99 features)
-    # Pad thêm nếu cần hoặc chỉ dùng 17 keypoints
-    flat = []
-    for kp in keypoints:
-        flat.extend([kp[0], kp[1], kp[2] if len(kp) > 2 else 1.0])
-    # Pad to 99 features (33 landmarks * 3) nếu model cũ yêu cầu
-    while len(flat) < 99:
-        flat.append(0.0)
-    return np.array(flat[:99]).reshape(1, -1)
+def trich_xuat_keypoints_yolo(keypoints, img_shape):
+    """Trích xuất và chuẩn hóa keypoints từ YOLO (17 keypoints, x,y)."""
+    h, w = img_shape[:2]
+    features = []
+    for i in range(17):
+        features.append(keypoints[i][0] / w)  # X chuẩn hóa
+        features.append(keypoints[i][1] / h)  # Y chuẩn hóa
+    return np.array(features).reshape(1, -1)
 
 
-def ve_skeleton_yolo(frame, keypoints, color=(0, 255, 0), thickness=2):
-    """Vẽ skeleton từ YOLO keypoints."""
-    h, w = frame.shape[:2]
-    
-    # Vẽ các điểm keypoint
-    for i, kp in enumerate(keypoints):
-        x, y = int(kp[0] * w), int(kp[1] * h)
-        conf = kp[2] if len(kp) > 2 else 1.0
-        if conf > 0.5:
-            cv2.circle(frame, (x, y), 5, color, -1)
+def ve_skeleton_yolo(frame, keypoints):
+    """Vẽ skeleton từ YOLO keypoints lên frame."""
+    # Các cặp kết nối skeleton (COCO format)
+    connections = [
+        (5, 6),   # vai - vai
+        (5, 7), (7, 9),   # vai trái - khuỷu - cổ tay
+        (6, 8), (8, 10),  # vai phải - khuỷu - cổ tay
+        (5, 11), (6, 12), # vai - hông
+        (11, 12),  # hông - hông
+        (11, 13), (13, 15),  # hông trái - gối - cổ chân
+        (12, 14), (14, 16),  # hông phải - gối - cổ chân
+        (0, 1), (0, 2),  # mũi - mắt
+        (1, 3), (2, 4),  # mắt - tai
+    ]
     
     # Vẽ các đường nối
-    for start, end in YOLO_SKELETON:
-        if start < len(keypoints) and end < len(keypoints):
-            x1, y1 = int(keypoints[start][0] * w), int(keypoints[start][1] * h)
-            x2, y2 = int(keypoints[end][0] * w), int(keypoints[end][1] * h)
-            conf1 = keypoints[start][2] if len(keypoints[start]) > 2 else 1.0
-            conf2 = keypoints[end][2] if len(keypoints[end]) > 2 else 1.0
-            if conf1 > 0.5 and conf2 > 0.5:
-                cv2.line(frame, (x1, y1), (x2, y2), color, thickness)
+    for (i, j) in connections:
+        pt1 = (int(keypoints[i][0]), int(keypoints[i][1]))
+        pt2 = (int(keypoints[j][0]), int(keypoints[j][1]))
+        if pt1[0] > 0 and pt1[1] > 0 and pt2[0] > 0 and pt2[1] > 0:
+            cv2.line(frame, pt1, pt2, (0, 255, 0), 2)
+    
+    # Vẽ các điểm keypoint
+    for i in range(17):
+        pt = (int(keypoints[i][0]), int(keypoints[i][1]))
+        if pt[0] > 0 and pt[1] > 0:
+            cv2.circle(frame, pt, 5, (0, 0, 255), -1)
 
 
 # ================== LOAD YOLO & MODEL ==================
 @st.cache_resource
 def load_yolo_pose():
-    """Load YOLO Pose model."""
-    return YOLO('yolov8n-pose.pt')  # Model nhỏ, nhanh
+    yolo_model = YOLO('yolov8n-pose.pt')
+    return yolo_model
 
 
 @st.cache_resource
@@ -273,28 +269,25 @@ def process_video_capture(cap, use_speak=True):
 
         # frame = cv2.flip(frame, 1)  # nếu muốn như gương (dùng cho webcam)
         
-        # YOLO Pose detection
+        # YOLO pose detection
         results = yolo_pose(frame, verbose=False)
         
-        # Lấy keypoints từ kết quả YOLO
-        keypoints_detected = None
-        if results and len(results) > 0 and results[0].keypoints is not None:
-            kpts = results[0].keypoints
-            if kpts.xy is not None and len(kpts.xy) > 0:
-                # Lấy keypoints của người đầu tiên, normalize về [0,1]
-                h, w = frame.shape[:2]
-                xy = kpts.xy[0].cpu().numpy()  # Shape: (17, 2)
-                conf = kpts.conf[0].cpu().numpy() if kpts.conf is not None else np.ones(17)
-                keypoints_detected = []
-                for i in range(len(xy)):
-                    keypoints_detected.append([xy[i][0]/w, xy[i][1]/h, conf[i]])
+        detected = False
+        kpts = None
+        
+        if results and len(results) > 0:
+            keypoints_obj = results[0].keypoints
+            if keypoints_obj is not None and len(keypoints_obj.xy) > 0:
+                kpts = keypoints_obj.xy[0].cpu().numpy()  # Shape: (17, 2)
+                if len(kpts) == 17:
+                    detected = True
 
-        if keypoints_detected is not None and len(keypoints_detected) >= 17:
+        if detected and kpts is not None:
             if hien_skeleton:
-                ve_skeleton_yolo(frame, keypoints_detected)
+                ve_skeleton_yolo(frame, kpts)
 
-            kp_for_model = trich_xuat_keypoints_yolo(keypoints_detected)
-            predicted_pose = model.predict(kp_for_model)[0]
+            features = trich_xuat_keypoints_yolo(kpts, frame.shape)
+            predicted_pose = model.predict(features)[0]
 
             # Chọn tư thế để CHẤM ĐIỂM
             if target_pose_option == "Auto (theo model)":
@@ -302,7 +295,7 @@ def process_video_capture(cap, use_speak=True):
             else:
                 pose_for_score = target_pose_option
 
-            goc_co_the = tinh_goc_cac_khop(keypoints_detected)
+            goc_co_the = tinh_goc_cac_khop_yolo(kpts)
             diem, can_chinh = danh_gia_tu_the(goc_co_the, pose_for_score)
 
             now = time.time()
@@ -473,33 +466,32 @@ elif mode == "Upload ảnh":
         if img is None:
             st.error("Không đọc được ảnh.")
         else:
-            # YOLO Pose detection
+            # YOLO pose detection
             results = yolo_pose(img, verbose=False)
             
-            keypoints_detected = None
-            if results and len(results) > 0 and results[0].keypoints is not None:
-                kpts = results[0].keypoints
-                if kpts.xy is not None and len(kpts.xy) > 0:
-                    h, w = img.shape[:2]
-                    xy = kpts.xy[0].cpu().numpy()
-                    conf = kpts.conf[0].cpu().numpy() if kpts.conf is not None else np.ones(17)
-                    keypoints_detected = []
-                    for i in range(len(xy)):
-                        keypoints_detected.append([xy[i][0]/w, xy[i][1]/h, conf[i]])
+            detected = False
+            kpts = None
+            
+            if results and len(results) > 0:
+                keypoints_obj = results[0].keypoints
+                if keypoints_obj is not None and len(keypoints_obj.xy) > 0:
+                    kpts = keypoints_obj.xy[0].cpu().numpy()
+                    if len(kpts) == 17:
+                        detected = True
 
-            if keypoints_detected is not None and len(keypoints_detected) >= 17:
+            if detected and kpts is not None:
                 if hien_skeleton:
-                    ve_skeleton_yolo(img, keypoints_detected)
+                    ve_skeleton_yolo(img, kpts)
 
-                kp_for_model = trich_xuat_keypoints_yolo(keypoints_detected)
-                predicted_pose = model.predict(kp_for_model)[0]
+                features = trich_xuat_keypoints_yolo(kpts, img.shape)
+                predicted_pose = model.predict(features)[0]
 
                 if target_pose_option == "Auto (theo model)":
                     pose_for_score = predicted_pose
                 else:
                     pose_for_score = target_pose_option
 
-                goc_co_the = tinh_goc_cac_khop(keypoints_detected)
+                goc_co_the = tinh_goc_cac_khop_yolo(kpts)
                 diem, can_chinh = danh_gia_tu_the(goc_co_the, pose_for_score)
 
                 cv2.putText(img, f"Predict: {predicted_pose}", (20, 40),

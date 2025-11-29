@@ -1,10 +1,8 @@
 streamlit
 opencv-python
-ultralytics
+mediapipe
 numpy
 pillow
 scikit-learn
 gtts
 playsound==1.2.2
-torch
-torchvision
